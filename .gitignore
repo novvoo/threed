@@ -1,0 +1,28 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# TripoSplat 模型权重与虚拟环境（约 5GB，超 GitHub 单文件 100MB 上限，网页「初始化后端」可自动重建）
+TripoSplat/.venv/
+TripoSplat/ckpts/
+TripoSplat/inputs/
+TripoSplat/generated_*
+TripoSplat/output*
+TripoSplat/preprocessed_image.webp
+TripoSplat/__pycache__/
+
+# 生成的模型产物（可由图片重新生成）
+public/models/generated_*
+
+# 其他
+.DS_Store
+*.log
+
+# 自动生成的推理脚本（网页初始化时写入）
+TripoSplat/run_local.py
+
+# 初始化配置
+triposplat.config.json
+
+# TripoSplat 为上游仓库 + 权重，由网页「初始化后端」自动拉取
+TripoSplat/

@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Three.js 原生 Gaussian Splatting</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; background: #07080f; font-family: -apple-system, "PingFang SC", sans-serif; }
+    #app { position: fixed; inset: 0; }
+
+    /* ---------------- 左侧控制面板 ---------------- */
+    #setup-capsule {
+      position: fixed; top: 16px; right: 16px; z-index: 15;
+      display: flex; align-items: center; gap: 8px;
+      background: linear-gradient(160deg, rgba(20, 24, 38, 0.85), rgba(10, 12, 20, 0.8));
+      backdrop-filter: blur(14px);
+      padding: 9px 14px; border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 6px 24px rgba(0,0,0,0.45);
+    }
+    #setup-capsule .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #ff9f43; box-shadow: 0 0 8px #ff9f43; flex: none;
+    }
+    #setup-capsule .dot.ready { background: #3ddc84; box-shadow: 0 0 8px #3ddc84; }
+    #setup-capsule button {
+      background: none; border: none; color: #dfe3ee;
+      font-size: 12.5px; cursor: pointer; padding: 0; white-space: nowrap;
+    }
+    #setup-capsule button:hover { color: white; }
+    #setup-capsule #cancel-setup-btn { color: #ff8a95; }
+    #ui {
+      position: fixed; top: 16px; left: 16px; z-index: 10;
+      display: flex; flex-direction: column; gap: 10px;
+      width: 288px; max-height: calc(100vh - 32px);
+      background: linear-gradient(160deg, rgba(20, 24, 38, 0.82), rgba(10, 12, 20, 0.78));
+      backdrop-filter: blur(14px);
+      padding: 16px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.09);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+      color: #dfe3ee;
+    }
+    #ui h1 {
+      font-size: 14px; font-weight: 700; letter-spacing: 0.4px;
+      background: linear-gradient(90deg, #7ea2ff, #b98cff);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    #ui .hint { font-size: 11px; color: #8a90a3; line-height: 1.55; }
+
+    .section-label {
+      font-size: 10px; font-weight: 600; letter-spacing: 1.2px;
+      color: #6b7189; text-transform: uppercase;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .section-label::after { content: ''; flex: 1; height: 1px; background: rgba(255,255,255,0.08); }
+
+    /* ---------------- 模型列表 ---------------- */
+    #model-list {
+      display: flex; flex-direction: column; gap: 4px;
+      overflow-y: auto; min-height: 20px; max-height: 34vh;
+      margin: -2px; padding: 2px;
+      scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.18) transparent;
+    }
+    #model-list::-webkit-scrollbar { width: 5px; }
+    #model-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); border-radius: 3px; }
+    #model-list .empty { font-size: 11px; color: #6b7189; padding: 4px 2px; }
+
+    .model-row {
+      display: flex; align-items: center; gap: 4px;
+      border-radius: 8px; transition: background 0.15s;
+    }
+    .model-row:hover { background: rgba(255,255,255,0.06); }
+    .model-name {
+      flex: 1; min-width: 0; text-align: left;
+      background: none; border: none; color: #c7cce0;
+      font-size: 12px; font-family: inherit; padding: 6px 8px;
+      cursor: pointer; border-radius: 8px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      transition: color 0.15s;
+    }
+    .model-name:hover { color: #ffffff; }
+    .model-name.active {
+      color: #ffffff;
+      background: linear-gradient(90deg, rgba(79,124,255,0.28), rgba(185,140,255,0.18));
+      box-shadow: inset 0 0 0 1px rgba(79,124,255,0.45);
+    }
+    .model-name .dup-tag {
+      font-size: 9px; color: #ffb454; border: 1px solid rgba(255,180,84,0.4);
+      border-radius: 4px; padding: 0 4px; margin-left: 5px; vertical-align: 1px;
+    }
+    .model-act {
+      background: none; border: none; color: #6b7189;
+      font-size: 11px; cursor: pointer; padding: 4px 5px; border-radius: 6px;
+      opacity: 0; transition: opacity 0.15s, color 0.15s;
+    }
+    .model-row:hover .model-act { opacity: 1; }
+    .model-act:hover { color: #ffffff; background: rgba(255,255,255,0.1); }
+    .model-act.del:hover { color: #ff8a95; background: rgba(255,90,106,0.15); }
+
+    /* ---------------- 通用按钮 ---------------- */
+    #ui .buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+    #ui button.tool {
+      background: rgba(255,255,255,0.07); color: #dfe3ee; border: 1px solid rgba(255,255,255,0.11);
+      border-radius: 8px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, transform 0.05s;
+    }
+    #ui button.tool:hover { background: rgba(255,255,255,0.14); }
+    #ui button.tool:active { transform: scale(0.97); }
+    #ui button.tool.active {
+      background: linear-gradient(90deg, #4f7cff, #7a5cff); border-color: transparent; color: #fff;
+    }
+    #ui button.tool.danger { border-color: rgba(255,90,106,0.5); color: #ff8a95; }
+    #ui button.tool.danger:hover { background: rgba(255,90,106,0.16); }
+    #ui button.tool:disabled { opacity: 0.45; cursor: default; }
+
+    #status {
+      font-size: 11px; color: #9aa0b4; line-height: 1.5;
+      background: rgba(0,0,0,0.25); border-radius: 8px; padding: 7px 9px;
+      min-height: 15px; word-break: break-all;
+    }
+
+    /* ---------------- 弹窗 ---------------- */
+    #modal-backdrop {
+      position: fixed; inset: 0; z-index: 40; display: none;
+      align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.55); backdrop-filter: blur(4px);
+    }
+    #modal-backdrop.visible { display: flex; }
+    #modal {
+      background: #12141f; color: #dfe3ee; border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 14px; padding: 22px; width: 380px; max-width: 90vw;
+      display: flex; flex-direction: column; gap: 14px;
+      box-shadow: 0 16px 48px rgba(0,0,0,0.6);
+    }
+    #modal h2 { font-size: 15px; }
+    #modal p { font-size: 12.5px; color: #9aa0b4; line-height: 1.6; }
+    #modal .preview { max-width: 100%; max-height: 160px; border-radius: 8px; align-self: center; }
+    #modal select {
+      background: rgba(255,255,255,0.08); color: #dfe3ee; border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 6px; padding: 6px 8px; font-size: 13px;
+    }
+    #modal .row { display: flex; align-items: center; justify-content: space-between; font-size: 13px; }
+    #modal .actions { display: flex; gap: 10px; justify-content: flex-end; }
+    #modal button { border-radius: 8px; padding: 8px 16px; font-size: 13px; cursor: pointer; border: none; }
+    #modal #modal-cancel { background: rgba(255,255,255,0.1); color: #dfe3ee; }
+    #modal #modal-ok { background: linear-gradient(90deg, #4f7cff, #7a5cff); color: white; }
+    #modal .progress-track {
+      height: 6px; border-radius: 3px; background: rgba(255,255,255,0.1); overflow: hidden; display: none;
+    }
+    #modal .progress-track.visible { display: block; }
+    #modal .progress-fill {
+      height: 100%; width: 0%; border-radius: 3px;
+      background: linear-gradient(90deg, #4f7cff, #b98cff); transition: width 1s;
+    }
+
+    /* ---------------- 拖放 / 错误提示 ---------------- */
+    #drop-overlay {
+      position: fixed; inset: 0; z-index: 20; display: none;
+      align-items: center; justify-content: center;
+      background: rgba(79, 124, 255, 0.12); border: 2px dashed #4f7cff;
+      color: #dfe3ee; font-size: 18px; pointer-events: none;
+    }
+    #drop-overlay.visible { display: flex; }
+    #webgpu-error {
+      position: fixed; inset: 0; z-index: 30; display: none;
+      align-items: center; justify-content: center; text-align: center;
+      color: #dfe3ee; background: #07080f; padding: 24px; line-height: 1.7;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="ui">
+    <h1>Three.js r186 原生 Gaussian Splatting</h1>
+    <div class="hint">WebGPURenderer + GaussianSplat Mesh。拖入 .spz / .ply / .splat 文件直接查看；拖入图片可调用本地 TripoSplat 生成 3D 模型。</div>
+    <div class="section-label">模型列表</div>
+    <div id="model-list"><div class="empty">加载中…</div></div>
+    <div class="buttons">
+      <button id="dedupe-btn" class="tool" hidden>去重（同内容模型）</button>
+      <button id="file-btn" class="tool">打开图片…</button>
+      <button id="download-btn" class="tool" hidden>下载当前模型 (.ply)</button>
+      <button id="last-job-btn" class="tool" hidden>加载上次生成结果</button>
+      <button id="cancel-convert-btn" class="tool danger" hidden>中断生成任务</button>
+    </div>
+    <div id="status">正在初始化 WebGPU…</div>
+    <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+  </div>
+  <div id="setup-modal" style="position:fixed;inset:0;z-index:45;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.55);backdrop-filter:blur(4px);">
+    <div style="background:#12141f;color:#dfe3ee;border:1px solid rgba(255,255,255,0.12);border-radius:14px;padding:22px;width:440px;max-width:92vw;display:flex;flex-direction:column;gap:14px;">
+      <h2 style="font-size:15px;">初始化后端</h2>
+      <label style="font-size:12px;color:#9aa0b4;display:flex;flex-direction:column;gap:6px;">生成器 Git 仓库（git clone 拉取）
+        <input id="setup-repo" style="background:rgba(255,255,255,0.08);color:#dfe3ee;border:1px solid rgba(255,255,255,0.15);border-radius:6px;padding:8px;font-size:12.5px;" />
+      </label>
+      <label style="font-size:12px;color:#9aa0b4;display:flex;flex-direction:column;gap:6px;">HuggingFace 模型权重 ID（4.2GB 下载）
+        <input id="setup-model" style="background:rgba(255,255,255,0.08);color:#dfe3ee;border:1px solid rgba(255,255,255,0.15);border-radius:6px;padding:8px;font-size:12.5px;" />
+      </label>
+      <p style="font-size:12px;color:#9aa0b4;line-height:1.6;margin:0;">配置会保存到 <code>triposplat.config.json</code>。初始化流程：拉取仓库 → 创建虚拟环境并装依赖（2~5 分钟）→ 下载权重（3~15 分钟）。</p>
+      <div style="display:flex;gap:10px;justify-content:flex-end;">
+        <button id="setup-cancel" style="background:rgba(255,255,255,0.1);color:#dfe3ee;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;">取消</button>
+        <button id="setup-start" style="background:#4f7cff;color:white;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;">开始初始化</button>
+      </div>
+    </div>
+  </div>
+  <div id="modal-backdrop">
+    <div id="modal">
+      <h2>转换为 3D Gaussian Splat？</h2>
+      <img id="modal-preview" class="preview" alt="预览" />
+      <p>将使用本地 TripoSplat（Apple Silicon MPS）以最高质量参数（262,144 Gaussians × 30 采样步）从这张图片生成 3D 高斯模型，预计 12~15 分钟，完成后自动加载。白底图片会自动去除背景；生成期间请保持电脑唤醒。</p>
+      <div id="modal-progress" class="progress-track"><div class="progress-fill"></div></div>
+      <div id="modal-status" style="font-size:12px;color:#8a90a3;"></div>
+      <div class="actions">
+        <button id="modal-cancel">取消</button>
+        <button id="modal-ok">开始生成</button>
+      </div>
+    </div>
+  </div>
+  <div id="setup-capsule" hidden>
+    <span class="dot"></span>
+    <button id="setup-btn">后端未就绪 · 点击初始化</button>
+    <button id="cancel-setup-btn" hidden>中断初始化</button>
+  </div>
+  <div id="drop-overlay">松开以加载 splat 文件</div>
+  <div id="webgpu-error"><div>当前浏览器不支持 WebGPU。<br/>请使用 Chrome / Edge 113+ 或 Safari 18+（需在设置中开启 WebGPU）访问本页面。</div></div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
