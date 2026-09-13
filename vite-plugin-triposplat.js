@@ -27,32 +27,9 @@ function loadConfig() {
 }
 function saveConfig(cfg) { fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2)); }
 
-// 上游仓库没有 run_local.py，克隆后自动生成（设备由环境变量 TSPLAT_DEVICE 指定）
-const RUN_LOCAL_PY = `"""Local inference: image -> PLY + SPLAT. Usage: python run_local.py <image> [num_gaussians] [out]"""
-import os, sys
-from triposplat import TripoSplatPipeline
+// run_local.py 固定在项目根目录（已提交），自动适配 TripoSplat 子目录的路径与设备
+const RUN_LOCAL_PATH = path.resolve(process.cwd(), 'run_local.py');
 
-IMAGE = sys.argv[1] if len(sys.argv) > 1 else "static/example_inputs/building_stone_house.webp"
-NUM = int(sys.argv[2]) if len(sys.argv) > 2 else 131072
-OUT = sys.argv[3] if len(sys.argv) > 3 else "output"
-STEPS = int(sys.argv[4]) if len(sys.argv) > 4 else 20
-device = os.environ.get("TSPLAT_DEVICE", "cuda")
-
-pipe = TripoSplatPipeline(
-    ckpt_path              = "ckpts/diffusion_models/triposplat_fp16.safetensors",
-    decoder_path           = "ckpts/vae/triposplat_vae_decoder_fp16.safetensors",
-    dinov3_path            = "ckpts/clip_vision/dino_v3_vit_h.safetensors",
-    flux2_vae_encoder_path = "ckpts/vae/flux2-vae.safetensors",
-    rmbg_path              = "ckpts/background_removal/birefnet.safetensors",
-    device                 = device,
-)
-print("STAGE: preprocess", flush=True)
-gaussian, prepared = pipe.run(IMAGE, num_gaussians=NUM, steps=STEPS, show_progress=True)
-print("STAGE: decode", flush=True)
-gaussian.save_ply(OUT + ".ply")
-gaussian.save_splat(OUT + ".splat")
-print("done: " + OUT + ".ply / " + OUT + ".splat (" + str(NUM) + " gaussians)", flush=True)
-`;
 
 // job: { id, status: 'running'|'done'|'error', progress, stage, error?, plyUrl?, splatUrl? }
 const jobs = new Map();
@@ -114,10 +91,6 @@ async function runSetup(config) {
       setup.stage = '拉取 TripoSplat 仓库 (git clone)';
       setup.progress = 2;
       await runProc('git', ['clone', '--depth', '1', setup.config.repo, TSPLAT_DIR], { cwd: process.cwd() });
-      fs.writeFileSync(path.join(TSPLAT_DIR, 'run_local.py'), RUN_LOCAL_PY);
-    }
-    if (!fs.existsSync(path.join(TSPLAT_DIR, 'run_local.py'))) {
-      fs.writeFileSync(path.join(TSPLAT_DIR, 'run_local.py'), RUN_LOCAL_PY);
     }
     if (!venvReady()) {
       setup.stage = '创建 Python 虚拟环境 (.venv)';
@@ -162,9 +135,8 @@ function startJob(imagePath, numGaussians) {
   const job = { id, status: 'running', progress: 0, stage: '排队中', log: '', outName };
   jobs.set(id, job);
 
-  const proc = spawn(PYTHON, ['-u', 'run_local.py', imagePath, String(numGaussians), outName, String(STEPS)], {
-    cwd: TSPLAT_DIR,
-    env: { ...process.env, TSPLAT_DEVICE: 'mps' },
+  const proc = spawn(PYTHON, ['-u', RUN_LOCAL_PATH, imagePath, String(numGaussians), outName, String(STEPS)], {
+    cwd: process.cwd(),
   });
   job.pid = proc.pid;
   job.cancel = () => { proc.kill('SIGTERM'); };
@@ -180,17 +152,17 @@ function startJob(imagePath, numGaussians) {
 
   proc.on('close', (code) => {
     if (job.status === 'cancelled') {
-      // 中断后清理半成品输出
+      // 中断后清理半成品输出（脚本在项目根目录运行，输出落在根目录）
       for (const ext of ['ply', 'splat']) {
-        fs.rm(path.join(TSPLAT_DIR, `${outName}.${ext}`), { force: true }, () => {});
+        fs.rm(path.join(process.cwd(), `${outName}.${ext}`), { force: true }, () => {});
       }
       return;
     }
     if (code === 0) {
       try {
         fs.mkdirSync(PUBLIC_MODELS, { recursive: true });
-        fs.copyFileSync(path.join(TSPLAT_DIR, `${outName}.ply`), path.join(PUBLIC_MODELS, `${outName}.ply`));
-        fs.copyFileSync(path.join(TSPLAT_DIR, `${outName}.splat`), path.join(PUBLIC_MODELS, `${outName}.splat`));
+        fs.copyFileSync(path.join(process.cwd(), `${outName}.ply`), path.join(PUBLIC_MODELS, `${outName}.ply`));
+        fs.copyFileSync(path.join(process.cwd(), `${outName}.splat`), path.join(PUBLIC_MODELS, `${outName}.splat`));
         job.status = 'done';
         job.progress = 100;
         job.plyUrl = `/models/${outName}.ply`;

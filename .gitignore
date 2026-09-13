@@ -18,8 +18,10 @@ public/models/generated_*
 .DS_Store
 *.log
 
-# 自动生成的推理脚本（网页初始化时写入）
-TripoSplat/run_local.py
+/generated_*.ply
+/generated_*.splat
+/output.ply
+/output.splat
 
 # 初始化配置
 triposplat.config.json

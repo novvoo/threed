@@ -57,7 +57,8 @@ MPS 直接可用，不需要换 torch 版本，也不存在 Metal 兼容问题�
 index.html                  网页 UI（模型切换、转换弹窗）
 src/main.js                 three.js 查看器 + 转换/下载/中断逻辑
 vite-plugin-triposplat.js   Vite 中间件：/api/triposplat/*（状态/初始化/转换/进度/中断）
-TripoSplat/                 上游推理仓库（MIT）+ run_local.py 本地脚本
+TripoSplat/                 上游推理仓库（MIT，网页初始化时自动拉取）
+run_local.py                本地推理脚本（根目录，自动适配 TripoSplat 子目录；设备自动检测 mps→cuda→cpu）
 public/models/              示例与生成产物（生成的文件会被 .gitignore 忽略）
 ```
 
