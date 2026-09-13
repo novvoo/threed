@@ -255,6 +255,74 @@ function toBase64(buffer) {
   return btoa(bin);
 }
 
+// ---------------------------------------------------------------- 零依赖 zip 打包（store 模式，不压缩）
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(data) {
+  let c = 0xffffffff;
+  for (let i = 0; i < data.length; i++) c = CRC_TABLE[(c ^ data[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+// entries: [{ name, data: Uint8Array }]
+function makeZip(entries) {
+  const encoder = new TextEncoder();
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const e of entries) {
+    const nameBytes = encoder.encode(e.name);
+    const crc = crc32(e.data);
+    const local = new Uint8Array(30 + nameBytes.length);
+    const dv = new DataView(local.buffer);
+    dv.setUint32(0, 0x04034b50, true);
+    dv.setUint16(4, 20, true);            // version needed
+    dv.setUint16(8, 0, true);             // store，不压缩
+    dv.setUint32(14, crc, true);
+    dv.setUint32(18, e.data.length, true);
+    dv.setUint32(22, e.data.length, true);
+    dv.setUint16(26, nameBytes.length, true);
+    local.set(nameBytes, 30);
+    parts.push(local, e.data);
+    central.push({ nameBytes, crc, size: e.data.length, offset });
+    offset += local.length + e.data.length;
+  }
+  const centralStart = offset;
+  const centralParts = [];
+  for (const c of central) {
+    const h = new Uint8Array(46 + c.nameBytes.length);
+    const dv = new DataView(h.buffer);
+    dv.setUint32(0, 0x02014b50, true);
+    dv.setUint16(4, 20, true);            // writer version
+    dv.setUint16(6, 20, true);            // version needed
+    dv.setUint16(8, 0, true);             // store
+    dv.setUint32(16, c.crc, true);
+    dv.setUint32(20, c.size, true);
+    dv.setUint32(24, c.size, true);
+    dv.setUint16(28, c.nameBytes.length, true);
+    dv.setUint32(42, c.offset, true);
+    h.set(c.nameBytes, 46);
+    centralParts.push(h);
+    offset += h.length;
+  }
+  const eocd = new Uint8Array(22);
+  const dv = new DataView(eocd.buffer);
+  dv.setUint32(0, 0x06054b50, true);
+  dv.setUint16(8, central.length, true);
+  dv.setUint16(10, central.length, true);
+  dv.setUint32(12, offset - centralStart, true);
+  dv.setUint32(16, centralStart, true);
+  return new Blob([...parts, ...centralParts, eocd], { type: 'application/zip' });
+}
+
 function buildPreviewHtml(modelName, modelBytes) {
   const b64 = toBase64(modelBytes);
   return `<!DOCTYPE html>
@@ -359,14 +427,25 @@ downloadBtn.addEventListener('click', async () => {
   if (!currentModelUrl) return;
   setStatus('正在打包下载…');
   try {
-    const modelName = currentModelUrl.split('/').pop();
-    const buf = await (await fetch(currentModelUrl)).arrayBuffer();
-    // 3D 文件本体
-    downloadBlob(new Blob([buf]), modelName);
-    // 内嵌模型数据的可预览 HTML
-    const html = buildPreviewHtml(modelName, buf);
-    downloadBlob(new Blob([html], { type: 'text/html' }), modelName.replace(/\.[^.]+$/, '') + '.preview.html');
-    setStatus(`已下载 ${modelName} 和同名预览 HTML（双击 HTML 即可预览，需联网加载 three.js CDN）`);
+    const group = modelGroups.find((g) => g.files.some((f) => f.url === currentModelUrl));
+    const entries = [];
+    if (group) {
+      // 该模型的所有格式产物（.ply + .splat 等）一起打包
+      for (const f of group.files) {
+        entries.push({ name: f.name, data: new Uint8Array(await (await fetch(f.url)).arrayBuffer()) });
+      }
+      var modelName = group.primary.name;
+    } else {
+      // 兜底：找不到分组信息时只打包当前模型
+      modelName = currentModelUrl.split('/').pop();
+      entries.push({ name: modelName, data: new Uint8Array(await (await fetch(currentModelUrl)).arrayBuffer()) });
+    }
+    // 内嵌 primary 模型数据的可预览 HTML
+    const html = buildPreviewHtml(modelName, entries[0].data);
+    const base = modelName.replace(/\.[^.]+$/, '');
+    entries.push({ name: `${base}.preview.html`, data: new TextEncoder().encode(html) });
+    downloadBlob(makeZip(entries), `${base}.zip`);
+    setStatus(`已下载 ${base}.zip（${entries.length - 1} 个模型文件 + 预览 HTML，双击 HTML 即可预览，需联网加载 three.js CDN）`);
   } catch (e) {
     setStatus(`下载失败：${e.message}`);
   }
@@ -644,43 +723,62 @@ function fmtSize(bytes) {
 let activeModelUrl = null;
 let modelFiles = [];
 
+// 按主文件名聚合（.ply / .splat 等多格式产物显示为一个条目），点击优先加载 .ply
+function groupModels(files) {
+  const map = new Map();
+  for (const f of files) {
+    const base = f.name.replace(/\.(spz|ply|splat|ksplat)$/i, '');
+    if (!map.has(base)) map.set(base, []);
+    map.get(base).push(f);
+  }
+  return [...map.entries()].map(([base, files]) => ({
+    base,
+    files,
+    primary: files.find((f) => f.name.toLowerCase().endsWith('.ply')) || files[0],
+  }));
+}
+
+let modelGroups = [];
+
 function renderModelList() {
+  modelGroups = groupModels(modelFiles);
   modelList.textContent = '';
-  if (!modelFiles.length) {
+  if (!modelGroups.length) {
     const empty = document.createElement('div');
     empty.className = 'empty';
     empty.textContent = '还没有模型，拖入图片生成或往 public/models/ 放文件';
     modelList.appendChild(empty);
   }
-  modelFiles.forEach((f) => {
+  modelGroups.forEach((g) => {
+    const totalSize = g.files.reduce((s, f) => s + f.size, 0);
     const row = document.createElement('div');
     row.className = 'model-row';
 
     const name = document.createElement('button');
-    name.className = 'model-name' + (f.url === activeModelUrl ? ' active' : '');
-    name.title = `${f.name}（${fmtSize(f.size)}）`;
-    name.textContent = f.name.replace(/\.(spz|ply|splat|ksplat)$/i, '');
-    if (f.dup) {
+    name.className = 'model-name' + (g.files.some((f) => f.url === activeModelUrl) ? ' active' : '');
+    name.title = `${g.base}（${fmtSize(totalSize)}${g.files.length > 1 ? ` · ${g.files.length} 个格式` : ''}）`;
+    name.textContent = g.base;
+    if (g.primary.dup) {
       const tag = document.createElement('span');
       tag.className = 'dup-tag';
       tag.textContent = '重复';
       name.appendChild(tag);
     }
-    name.addEventListener('click', () => loadUrl(f.url, f.name));
+    name.addEventListener('click', () => loadUrl(g.primary.url, g.base));
     row.appendChild(name);
 
     const rename = document.createElement('button');
     rename.className = 'model-act';
     rename.textContent = '✎';
     rename.title = '重命名';
-    rename.addEventListener('click', () => renameModel(f));
+    rename.addEventListener('click', () => renameModel(g));
     row.appendChild(rename);
 
     const del = document.createElement('button');
     del.className = 'model-act del';
     del.textContent = '✕';
     del.title = '删除';
-    del.addEventListener('click', () => deleteModel(f));
+    del.addEventListener('click', () => deleteModel(g));
     row.appendChild(del);
 
     modelList.appendChild(row);
@@ -708,36 +806,43 @@ async function postModelAction(action, payload) {
   return data;
 }
 
-async function renameModel(file) {
-  const current = file.name.replace(/\.(spz|ply|splat|ksplat)$/i, '');
-  const ext = file.name.slice(current.length);
-  const input = prompt('重命名模型：', current);
+async function renameModel(group) {
+  const input = prompt('重命名模型：', group.base);
   if (input === null) return;
   const next = input.trim();
-  if (!next || next + ext === file.name) return;
+  if (!next || next === group.base) return;
   try {
-    await postModelAction('rename', { from: file.name, to: next + ext });
-    if (activeModelUrl === file.url) activeModelUrl = `/models/${next}${ext}`;
+    for (const f of group.files) {
+      await postModelAction('rename', { from: f.name, to: next + f.name.slice(group.base.length) });
+    }
+    if (group.files.some((f) => f.url === activeModelUrl)) {
+      activeModelUrl = activeModelUrl.replace(`/${group.base}.`, `/${next}.`);
+    }
     await refreshModelList();
-    setStatus(`已重命名为 ${next}${ext}`);
+    setStatus(`已重命名为 ${next}`);
   } catch (e) {
     setStatus(`重命名失败：${e.message}`);
+    await refreshModelList();
   }
 }
 
-async function deleteModel(file) {
-  if (!confirm(`删除模型「${file.name}」？此操作不可恢复。`)) return;
+async function deleteModel(group) {
+  if (!confirm(`删除模型「${group.base}」（共 ${group.files.length} 个文件）？此操作不可恢复。`)) return;
   try {
-    await postModelAction('delete', { name: file.name });
-    if (activeModelUrl === file.url) {
+    for (const f of group.files) {
+      await postModelAction('delete', { name: f.name });
+    }
+    if (group.files.some((f) => f.url === activeModelUrl)) {
       disposeCurrentSplats();
       setCurrentModel(null);
+      activeModelUrl = null;
       setStatus('已删除当前展示的模型');
     }
     await refreshModelList();
-    setStatus(`已删除 ${file.name}`);
+    setStatus(`已删除 ${group.base}`);
   } catch (e) {
     setStatus(`删除失败：${e.message}`);
+    await refreshModelList();
   }
 }
 
