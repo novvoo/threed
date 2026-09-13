@@ -244,15 +244,132 @@ function setCurrentModel(url) {
   downloadBtn.hidden = !url;
 }
 
-downloadBtn.addEventListener('click', async () => {
-  if (!currentModelUrl) return;
-  const resp = await fetch(currentModelUrl);
-  const blob = await resp.blob();
+// ---------------------------------------------------------------- 可预览 HTML 生成（模型 base64 内嵌，双击即可打开）
+function toBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+function buildPreviewHtml(modelName, modelBytes) {
+  const b64 = toBase64(modelBytes);
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Gaussian Splat 预览 - ${JSON.stringify(modelName).slice(1, -1)}</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { overflow:hidden; background:#07080f; font-family:-apple-system,"PingFang SC",sans-serif; }
+  #app { position:fixed; inset:0; }
+  #tip { position:fixed; top:12px; left:12px; z-index:10; color:#8a90a3; font-size:12px;
+         background:rgba(10,12,20,0.7); backdrop-filter:blur(10px); padding:8px 12px;
+         border-radius:10px; border:1px solid rgba(255,255,255,0.08); }
+  #err { position:fixed; inset:0; z-index:30; display:none; align-items:center; justify-content:center;
+         text-align:center; color:#dfe3ee; padding:24px; line-height:1.7; }
+</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.webgpu.js","three/webgpu":"https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.webgpu.js","three/tsl":"https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.tsl.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.186.0/examples/jsm/"}}
+</script>
+</head>
+<body>
+<div id="app"></div>
+<div id="tip">拖动旋转 · 滚轮缩放 · 右键平移</div>
+<div id="err"><div>当前浏览器不支持 WebGPU。<br/>请使用 Chrome / Edge 113+ 或 Safari 18+ 打开本文件。</div></div>
+<script type="module">
+import * as THREE from 'three/webgpu';
+import { TrackballControls } from 'three/addons/controls/TrackballControls.js';
+import { GaussianSplat } from 'three/addons/objects/GaussianSplat.js';
+import { SPZLoader } from 'three/addons/loaders/SPZLoader.js';
+import { SPLATLoader } from 'three/addons/loaders/SPLATLoader.js';
+import { GaussianSplatPLYLoader } from 'three/addons/loaders/GaussianSplatPLYLoader.js';
+import { KSPLATLoader } from 'three/addons/loaders/KSPLATLoader.js';
+
+const MODEL_B64 = '${b64}';
+
+let renderer;
+try {
+  renderer = new THREE.WebGPURenderer({ antialias: true });
+  await renderer.init();
+} catch (e) {
+  document.getElementById('err').style.display = 'flex';
+  throw e;
+}
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.getElementById('app').appendChild(renderer.domElement);
+THREE.ColorManagement.workingColorSpace = THREE.SRGBColorSpace;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x07080f);
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.01, 100);
+const controls = new TrackballControls(camera, renderer.domElement);
+controls.rotateSpeed = 4;
+controls.zoomSpeed = 1.2;
+controls.panSpeed = 0.8;
+controls.dynamicDampingFactor = 0.15;
+
+// 解码内嵌模型数据为 Blob URL
+const bytes = Uint8Array.from(atob(MODEL_B64), (c) => c.charCodeAt(0));
+const url = URL.createObjectURL(new Blob([bytes]));
+
+const ext = '${JSON.stringify(modelName).slice(1, -1)}'.split('.').pop().toLowerCase();
+const loader = { spz: SPZLoader, ply: GaussianSplatPLYLoader, splat: SPLATLoader, ksplat: KSPLATLoader }[ext];
+const geometry = await new loader().loadAsync(url);
+
+// TripoSplat 导出的 PLY 为 Y 朝下约定，绕 X 轴翻正
+if (ext === 'ply') geometry.rotateX(Math.PI);
+
+const splat = new GaussianSplat(geometry);
+scene.add(splat);
+
+// 按包围球自动取景
+geometry.computeBoundingSphere();
+const radius = geometry.boundingSphere?.radius || 1;
+const dist = (radius / Math.sin(THREE.MathUtils.degToRad(camera.fov) / 2)) * 1.15;
+camera.position.set(0, radius * 0.2, dist);
+controls.update();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+</script>
+</body>
+</html>`;
+}
+
+function downloadBlob(blob, filename) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = currentModelUrl.split('/').pop();
+  a.download = filename;
   a.click();
-  URL.revokeObjectURL(a.href);
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+
+downloadBtn.addEventListener('click', async () => {
+  if (!currentModelUrl) return;
+  setStatus('正在打包下载…');
+  try {
+    const modelName = currentModelUrl.split('/').pop();
+    const buf = await (await fetch(currentModelUrl)).arrayBuffer();
+    // 3D 文件本体
+    downloadBlob(new Blob([buf]), modelName);
+    // 内嵌模型数据的可预览 HTML
+    const html = buildPreviewHtml(modelName, buf);
+    downloadBlob(new Blob([html], { type: 'text/html' }), modelName.replace(/\.[^.]+$/, '') + '.preview.html');
+    setStatus(`已下载 ${modelName} 和同名预览 HTML（双击 HTML 即可预览，需联网加载 three.js CDN）`);
+  } catch (e) {
+    setStatus(`下载失败：${e.message}`);
+  }
 });
 
 function setConvertingUI(on) {
