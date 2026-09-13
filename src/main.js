@@ -386,6 +386,7 @@ function startConversionUI(jobId) {
   if (!converting) {
     // 页面刷新后恢复：不经过弹窗，直接进入轮询
     modalProgress.classList.add('visible');
+    modalCancel.textContent = '后台运行'; // 与正常转换路径一致，刷新恢复前按钮残留「取消」文案
     converting = true;
     pollJob(jobId);
   }
